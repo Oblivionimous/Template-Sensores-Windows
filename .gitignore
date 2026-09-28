@@ -1,0 +1,9 @@
+# Dados do ambiente que nao devem ir para o repositorio
+*.psk
+zabbix_agent2.conf
+*.log
+*.log.old
+
+# Arquivos temporarios de teste
+sensors_flat.json
+*.tmp

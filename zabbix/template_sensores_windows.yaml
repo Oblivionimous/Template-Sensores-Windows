@@ -1,0 +1,232 @@
+zabbix_export:
+  version: '7.0'
+  template_groups:
+    - uuid: 68959204beb348279ccd3d51380f43b3
+      name: Personalizados
+  templates:
+    - uuid: 05f45a95180346d580f2fb5b7685a220
+      template: 'Template Sensores Windows'
+      name: 'Template Sensores Windows'
+      groups:
+        - name: Personalizados
+      items:
+        - uuid: fc731e2ee82f4133b0067a9de9fd2c07
+          name: 'Sensores de Hardware (LHM JSON)'
+          type: ZABBIX_ACTIVE
+          key: lhm.sensors
+          history: '0'
+          value_type: TEXT
+          trends: '0'
+          tags:
+            - tag: component
+              value: hardware
+            - tag: source
+              value: librehardwaremonitor
+            - tag: target
+              value: sensors
+      discovery_rules:
+        - uuid: 09194dcff3ae4bf58fd0de4b2de5011b
+          name: 'Hardware Sensors Discovery'
+          type: DEPENDENT
+          key: lhm.sensors.discovery
+          delay: '0'
+          filter:
+            conditions:
+              - macro: '{#SENSOR_TYPE}'
+                value: ^(Temperature|Fan|Load|Voltage|Power)$
+                formulaid: A
+          item_prototypes:
+            - uuid: c81a399c449e416391b3dd6dda297e01
+              name: 'Hardware: {#SENSOR_HW} - {#SENSOR_NAME} ({#SENSOR_TYPE})'
+              type: DEPENDENT
+              key: 'lhm.sensor[{#SENSOR_ID}]'
+              delay: '0'
+              value_type: FLOAT
+              units: '{#SENSOR_UNIT}'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id == ''{#SENSOR_ID}'')].value.first()'
+              master_item:
+                key: lhm.sensors
+              tags:
+                - tag: component
+                  value: hardware
+                - tag: component
+                  value: '{#SENSOR_TYPE}'
+                - tag: sensor.hw
+                  value: '{#SENSOR_HW}'
+                - tag: sensor.type
+                  value: '{#SENSOR_TYPE}'
+          master_item:
+            key: lhm.sensors
+          lld_macro_paths:
+            - lld_macro: '{#SENSOR_HW}'
+              path: $.hardware
+            - lld_macro: '{#SENSOR_ID}'
+              path: $.id
+            - lld_macro: '{#SENSOR_NAME}'
+              path: $.name
+            - lld_macro: '{#SENSOR_TYPE}'
+              path: $.type
+            - lld_macro: '{#SENSOR_UNIT}'
+              path: $.unit
+      dashboards:
+        - uuid: 12a86b056ca947d7aa98ca61803f1b0a
+          name: 'Temperaturas Críticas (CPU, GPU e Armazenamento)'
+          pages:
+            - widgets:
+                - type: svggraph
+                  name: 'CPU - Temperaturas (°C)'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 0040FF
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - CPU Package (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: * - Core Average (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.2
+                      value: 'Hardware: * - Core Max (Temperature)'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: LAZYV
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'CPU - Uso e Desempenho (%)'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 00BFFF
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - CPU Total (Load)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: * - CPU Core Max (Load)'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: FDCYI
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'CPU - Consumo de Energia (Watts)'
+                  'y': '10'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FDD835
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - CPU Package (Power)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: * - CPU Cores (Power)'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: PYRGD
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'GPU - Temperaturas (°C)'
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF4000
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Core (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: * - GPU Hot Spot (Temperature)'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: EMYNH
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'GPU - Uso e VRAM (%)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 66BB6A
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Core (Load)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: * - GPU Memory (Load)'
+                    - type: STRING
+                      name: ds.0.items.2
+                      value: 'Hardware: * - GPU Memory Controller (Load)'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: OJVZQ
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'GPU - Consumo e Fans'
+                  x: '36'
+                  'y': '10'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF8F00
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Package (Power)'
+                    - type: INTEGER
+                      name: ds.1.axisy
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FF6F00
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - GPU Fan * (Fan)'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: JCJLA
