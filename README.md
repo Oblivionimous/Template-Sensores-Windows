@@ -38,7 +38,3 @@ Este repositório não cobre instalação do agente, PSK, IP nem rede.
 6. [Validação no Zabbix](docs/06-validacao-no-zabbix.md)
 7. [Solução de problemas](docs/07-solucao-de-problemas.md)
 8. [Limitações e pendências](docs/08-limitacoes-e-pendencias.md)
-
-## Arquivos que não devem ser versionados
-
-O `zabbix_agent2.conf`, o `zabbix_agent2.psk` e os logs do agente contêm dados do ambiente. O `.gitignore` bloqueia esses arquivos.
