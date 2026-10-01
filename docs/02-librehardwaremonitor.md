@@ -92,6 +92,7 @@ Esta etapa ainda não foi testada neste ambiente.
    ```powershell
    Get-ScheduledTask | Where-Object { $_.TaskName -match 'Libre' } | Select-Object TaskName, State, @{n='RunLevel';e={$_.Principal.RunLevel}}
    ```
+<img width="1109" height="140" alt="image" src="https://github.com/user-attachments/assets/1ed518ff-d1ee-40f7-b390-bb2b88706816" />
 
 2. O resultado esperado é uma tarefa com `RunLevel` igual a `Highest`.
 3. Reinicie o desktop e faça logon.
