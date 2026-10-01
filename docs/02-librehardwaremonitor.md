@@ -79,6 +79,7 @@ Ao final, o menu Options deve ter estes itens marcados:
 Get-Process LibreHardwareMonitor
 (Invoke-WebRequest -UseBasicParsing http://localhost:8085/data.json).StatusCode
 ```
+<img width="975" height="223" alt="image" src="https://github.com/user-attachments/assets/8f73bcff-6636-4a80-8783-dd554ac1c474" />
 
 O primeiro comando deve listar o processo e o segundo deve retornar `200`.
 
