@@ -7,6 +7,26 @@ zabbix_export:
     - uuid: 05f45a95180346d580f2fb5b7685a220
       template: 'Template Sensores Windows'
       name: 'Template Sensores Windows'
+      description: |
+        Sensores de hardware (desktop e notebook) coletados do LibreHardwareMonitor.
+        
+        Requisitos no host Windows
+        - LibreHardwareMonitor em execução elevada com Remote Web Server ativo (porta 8085)
+        - UserParameter lhm.sensors no Zabbix Agent 2 retornando um array JSON com os campos hardware, id, name, type, unit e value
+        - Interface do agente em modo ativo (ServerActive e Hostname iguais ao host name no frontend)
+        
+        Coleta
+        - Um único item mestre (lhm.sensors) e todos os sensores como itens dependentes, sem nova execução do script
+        - A descoberta reduz o JSON a metadados e só reprocessa quando a lista de sensores muda (heartbeat de 1h)
+        
+        Ajuste fino
+        - Tipos, nomes e hardware descobertos são filtrados pelas macros {$LHM.SENSOR.*}
+        - Limites de temperatura aceitam contexto por {#SENSOR_ID}, com regex já definidas para CPU, GPU, armazenamento e placa-mãe
+        - Triggers de ventoinha ficam inativas com {$LHM.FAN.MIN}=0. Defina contexto por sensor para ativar
+        - Triggers de bateria e de vida útil de SSD só são criadas quando o sensor existe (overrides da LLD)
+      vendor:
+        name: mauro.paiva
+        version: 7.0-3
       groups:
         - name: Personalizados
       items:
@@ -14,16 +34,66 @@ zabbix_export:
           name: 'Sensores de Hardware (LHM JSON)'
           type: ZABBIX_ACTIVE
           key: lhm.sensors
+          delay: '{$LHM.INTERVAL}'
           history: '0'
           value_type: TEXT
           trends: '0'
+          description: 'Item mestre. Retorna o array JSON completo de sensores do LibreHardwareMonitor. Não armazena histórico, apenas alimenta os itens dependentes e a descoberta.'
+          timeout: 10s
           tags:
             - tag: component
               value: hardware
+            - tag: component
+              value: raw
             - tag: source
               value: librehardwaremonitor
             - tag: target
               value: sensors
+        - uuid: b77462cb3e614ccd8febce76a554b5f9
+          name: 'LHM: quantidade de sensores retornados'
+          type: DEPENDENT
+          key: lhm.sensors.count
+          delay: '0'
+          history: 7d
+          description: 'Quantidade de sensores no JSON. Queda brusca costuma indicar LibreHardwareMonitor sem privilégio de administrador ou reiniciado. Ausência de dados indica falha do script ou do Remote Web Server.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.length()
+          master_item:
+            key: lhm.sensors
+          tags:
+            - tag: component
+              value: hardware
+            - tag: component
+              value: health
+            - tag: source
+              value: librehardwaremonitor
+          triggers:
+            - uuid: c529770e15d64d5e9e9bea70fc5b4372
+              expression: 'last(/Template Sensores Windows/lhm.sensors.count)<max(/Template Sensores Windows/lhm.sensors.count,1h)*{$LHM.SENSORS.DROP.RATIO}'
+              name: 'LHM: quantidade de sensores caiu de forma abrupta'
+              opdata: 'Atual: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'A quantidade de sensores ficou abaixo de {$LHM.SENSORS.DROP.RATIO} vezes o máximo da última hora. Causa comum é o LibreHardwareMonitor executando sem elevação, o que remove sensores de CPU e placa-mãe.'
+              dependencies:
+                - name: 'LHM: sem dados de sensores há {$LHM.NODATA.TIMEOUT}'
+                  expression: 'nodata(/Template Sensores Windows/lhm.sensors.count,{$LHM.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: component
+                  value: health
+                - tag: scope
+                  value: availability
+            - uuid: 54ff845b3bbe4551998fcbc1968500dc
+              expression: 'nodata(/Template Sensores Windows/lhm.sensors.count,{$LHM.NODATA.TIMEOUT})=1'
+              name: 'LHM: sem dados de sensores há {$LHM.NODATA.TIMEOUT}'
+              priority: AVERAGE
+              description: 'O item mestre lhm.sensors não entrega JSON válido. Verifique se o LibreHardwareMonitor está aberto, se o Remote Web Server responde em http://localhost:8085/data.json e se o agente ativo está conectado.'
+              tags:
+                - tag: component
+                  value: health
+                - tag: scope
+                  value: availability
       discovery_rules:
         - uuid: 09194dcff3ae4bf58fd0de4b2de5011b
           name: 'Hardware Sensors Discovery'
@@ -31,22 +101,48 @@ zabbix_export:
           key: lhm.sensors.discovery
           delay: '0'
           filter:
+            evaltype: AND
             conditions:
-              - macro: '{#SENSOR_TYPE}'
-                value: ^(Temperature|Fan|Load|Voltage|Power)$
+              - macro: '{#SENSOR_HW}'
+                value: '{$LHM.SENSOR.HW.MATCHES}'
                 formulaid: A
+              - macro: '{#SENSOR_HW}'
+                value: '{$LHM.SENSOR.HW.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
+              - macro: '{#SENSOR_NAME}'
+                value: '{$LHM.SENSOR.NAME.MATCHES}'
+                formulaid: C
+              - macro: '{#SENSOR_NAME}'
+                value: '{$LHM.SENSOR.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: D
+              - macro: '{#SENSOR_TYPE}'
+                value: '{$LHM.SENSOR.TYPE.MATCHES}'
+                formulaid: E
+              - macro: '{#SENSOR_TYPE}'
+                value: '{$LHM.SENSOR.TYPE.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: F
+          lifetime: 30d
+          enabled_lifetime_type: DISABLE_AFTER
+          enabled_lifetime: 1d
+          description: 'Descobre os sensores do LibreHardwareMonitor a partir do item mestre. O pré-processamento remove os valores e ordena a lista, de modo que a regra só é reprocessada quando sensores entram ou saem.'
           item_prototypes:
             - uuid: c81a399c449e416391b3dd6dda297e01
               name: 'Hardware: {#SENSOR_HW} - {#SENSOR_NAME} ({#SENSOR_TYPE})'
               type: DEPENDENT
               key: 'lhm.sensor[{#SENSOR_ID}]'
               delay: '0'
+              history: 30d
               value_type: FLOAT
-              units: '{#SENSOR_UNIT}'
+              units: '!{#SENSOR_UNIT}'
+              description: 'Sensor {#SENSOR_ID} do tipo {#SENSOR_TYPE} em {#SENSOR_HW}.'
               preprocessing:
                 - type: JSONPATH
                   parameters:
                     - '$[?(@.id == ''{#SENSOR_ID}'')].value.first()'
+                  error_handler: DISCARD_VALUE
               master_item:
                 key: lhm.sensors
               tags:
@@ -58,6 +154,162 @@ zabbix_export:
                   value: '{#SENSOR_HW}'
                 - tag: sensor.type
                   value: '{#SENSOR_TYPE}'
+              trigger_prototypes:
+                - uuid: 2c865c4a077b4532a10bf62d9ccb9f90
+                  expression: 'last(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}])>{$LHM.STORAGE.WEAR.WARN}'
+                  name: 'Armazenamento com desgaste elevado: {#SENSOR_HW} (>{$LHM.STORAGE.WEAR.WARN}%)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: WARNING
+                  description: 'Percentual de vida útil consumido (SMART NVMe Percentage Used) acima do limite.'
+                  manual_close: 'YES'
+                  tags:
+                    - tag: component
+                      value: storage
+                    - tag: scope
+                      value: capacity
+                - uuid: fbf83beee1c94c6b83ffd81d781a36f9
+                  expression: 'last(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}])<{$LHM.STORAGE.LIFE.MIN}'
+                  name: 'Armazenamento com vida útil baixa: {#SENSOR_HW} - {#SENSOR_NAME} (<{$LHM.STORAGE.LIFE.MIN}%)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: HIGH
+                  description: 'Vida útil restante ou área reserva do SSD abaixo do limite. Planejar substituição e conferir backup.'
+                  manual_close: 'YES'
+                  tags:
+                    - tag: component
+                      value: storage
+                    - tag: scope
+                      value: capacity
+                - uuid: 9193df03bbe1426295a11c075859d921
+                  expression: 'last(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}])<{$LHM.BATTERY.CHARGE.WARN}'
+                  name: 'Bateria com carga baixa: {#SENSOR_HW} (<{$LHM.BATTERY.CHARGE.WARN}%)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: WARNING
+                  dependencies:
+                    - name: 'Bateria com carga crítica: {#SENSOR_HW} (<{$LHM.BATTERY.CHARGE.CRIT}%)'
+                      expression: 'last(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}])<{$LHM.BATTERY.CHARGE.CRIT}'
+                  tags:
+                    - tag: component
+                      value: battery
+                    - tag: scope
+                      value: capacity
+                - uuid: 457ed48781074e24b97d0c8d3d442ff1
+                  expression: 'last(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}])<{$LHM.BATTERY.CHARGE.CRIT}'
+                  name: 'Bateria com carga crítica: {#SENSOR_HW} (<{$LHM.BATTERY.CHARGE.CRIT}%)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: HIGH
+                  tags:
+                    - tag: component
+                      value: battery
+                    - tag: scope
+                      value: capacity
+                - uuid: f01a7f35016f4676ad55ba445eda63b4
+                  expression: 'last(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}])>{$LHM.BATTERY.DEGRADATION.WARN}'
+                  name: 'Bateria com degradação elevada: {#SENSOR_HW} (>{$LHM.BATTERY.DEGRADATION.WARN}%)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: WARNING
+                  description: 'Perda de capacidade em relação à capacidade de projeto acima do limite. Avaliar substituição da bateria.'
+                  manual_close: 'YES'
+                  tags:
+                    - tag: component
+                      value: battery
+                    - tag: scope
+                      value: capacity
+                - uuid: eaf0f7e3f6984f73b9600627d3c4c0e2
+                  expression: 'min(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.TEMP.PERIOD})>{$LHM.TEMP.CRIT:"{#SENSOR_ID}"}'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'max(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.TEMP.PERIOD})<{$LHM.TEMP.CRIT:"{#SENSOR_ID}"}-{$LHM.TEMP.HYST}'
+                  name: 'Temperatura acima do limite crítico: {#SENSOR_HW} - {#SENSOR_NAME} (>{$LHM.TEMP.CRIT:"{#SENSOR_ID}"}°C)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: HIGH
+                  description: 'Temperatura mínima dos últimos {$LHM.TEMP.PERIOD} acima do limite crítico. Risco de thermal throttling ou desligamento.'
+                  tags:
+                    - tag: component
+                      value: temperature
+                    - tag: scope
+                      value: performance
+                - uuid: cb7fb047e3f04955aad920b991cd734d
+                  expression: 'min(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.TEMP.PERIOD})>{$LHM.TEMP.WARN:"{#SENSOR_ID}"}'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'max(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.TEMP.PERIOD})<{$LHM.TEMP.WARN:"{#SENSOR_ID}"}-{$LHM.TEMP.HYST}'
+                  name: 'Temperatura acima do limite de atenção: {#SENSOR_HW} - {#SENSOR_NAME} (>{$LHM.TEMP.WARN:"{#SENSOR_ID}"}°C)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: WARNING
+                  description: 'Temperatura mínima dos últimos {$LHM.TEMP.PERIOD} acima do limite de atenção. Recupera quando o máximo do período fica {$LHM.TEMP.HYST}°C abaixo do limite.'
+                  dependencies:
+                    - name: 'Temperatura acima do limite crítico: {#SENSOR_HW} - {#SENSOR_NAME} (>{$LHM.TEMP.CRIT:"{#SENSOR_ID}"}°C)'
+                      expression: 'min(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.TEMP.PERIOD})>{$LHM.TEMP.CRIT:"{#SENSOR_ID}"}'
+                      recovery_expression: 'max(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.TEMP.PERIOD})<{$LHM.TEMP.CRIT:"{#SENSOR_ID}"}-{$LHM.TEMP.HYST}'
+                  tags:
+                    - tag: component
+                      value: temperature
+                    - tag: scope
+                      value: performance
+                - uuid: 3b8d36285f7145de96a6c8cf76928a7b
+                  expression: 'max(/Template Sensores Windows/lhm.sensor[{#SENSOR_ID}],{$LHM.FAN.PERIOD})<{$LHM.FAN.MIN:"{#SENSOR_ID}"}'
+                  name: 'Ventoinha abaixo do mínimo: {#SENSOR_HW} - {#SENSOR_NAME} (<{$LHM.FAN.MIN:"{#SENSOR_ID}"} RPM)'
+                  opdata: 'Atual: {ITEM.LASTVALUE1}'
+                  discover: NO_DISCOVER
+                  priority: AVERAGE
+                  description: 'Rotação máxima dos últimos {$LHM.FAN.PERIOD} abaixo do mínimo. Com a macro LHM.FAN.MIN em 0 a trigger nunca dispara. Ative por sensor criando a macro com contexto igual ao {#SENSOR_ID} da ventoinha.'
+                  tags:
+                    - tag: component
+                      value: fan
+                    - tag: scope
+                      value: availability
+          graph_prototypes:
+            - uuid: 7cd451d5328946ccbe68dea02ad4de32
+              name: 'Armazenamento: {#SENSOR_HW} - {#SENSOR_NAME}'
+              ymin_type_1: FIXED
+              ymax_type_1: FIXED
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: 3949AB
+                  calc_fnc: ALL
+                  item:
+                    host: 'Template Sensores Windows'
+                    key: 'lhm.sensor[{#SENSOR_ID}]'
+              discover: NO_DISCOVER
+            - uuid: 2d450d92e61c41349edf810f3f27bbf5
+              name: 'Bateria: {#SENSOR_HW} - {#SENSOR_NAME}'
+              ymin_type_1: FIXED
+              ymax_type_1: FIXED
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: 00C853
+                  calc_fnc: ALL
+                  item:
+                    host: 'Template Sensores Windows'
+                    key: 'lhm.sensor[{#SENSOR_ID}]'
+              discover: NO_DISCOVER
+            - uuid: e90582cdc99b48928bf63a2b939fdb4a
+              name: 'Temperatura: {#SENSOR_HW} - {#SENSOR_NAME}'
+              ymin_type_1: FIXED
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: FF5722
+                  calc_fnc: ALL
+                  item:
+                    host: 'Template Sensores Windows'
+                    key: 'lhm.sensor[{#SENSOR_ID}]'
+              discover: NO_DISCOVER
+            - uuid: 34fe2d50ce3348aabab8d6ba87f34849
+              name: 'Ventoinha: {#SENSOR_HW} - {#SENSOR_NAME}'
+              ymin_type_1: FIXED
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: 26A69A
+                  calc_fnc: ALL
+                  item:
+                    host: 'Template Sensores Windows'
+                    key: 'lhm.sensor[{#SENSOR_ID}]'
+              discover: NO_DISCOVER
           master_item:
             key: lhm.sensors
           lld_macro_paths:
@@ -71,28 +323,312 @@ zabbix_export:
               path: $.type
             - lld_macro: '{#SENSOR_UNIT}'
               path: $.unit
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var data = JSON.parse(value);
+                  if (!Array.isArray(data)) {
+                      return value;
+                  }
+                  var out = [];
+                  for (var i = 0; i < data.length; i++) {
+                      var s = data[i];
+                      out.push({hardware: s.hardware, id: s.id, name: s.name, type: s.type, unit: s.unit});
+                  }
+                  out.sort(function (a, b) {
+                      return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+                  });
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          overrides:
+            - name: 'Temperatura: criar triggers e gráficos'
+              step: '1'
+              filter:
+                conditions:
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Temperature$
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Temperatura acima'
+                  discover: DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Temperatura:'
+                  discover: DISCOVER
+            - name: 'Temperatura: sem triggers e gráficos por núcleo individual'
+              step: '2'
+              filter:
+                evaltype: AND
+                conditions:
+                  - macro: '{#SENSOR_NAME}'
+                    value: '^(CPU )?(P-|E-)?Core #[0-9]+'
+                    formulaid: A
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Temperature$
+                    formulaid: B
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Temperatura acima'
+                  discover: NO_DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Temperatura:'
+                  discover: NO_DISCOVER
+            - name: 'Ventoinha: criar trigger e gráfico'
+              step: '3'
+              filter:
+                conditions:
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Fan$
+                    formulaid: A
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Ventoinha abaixo'
+                  discover: DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Ventoinha:'
+                  discover: DISCOVER
+            - name: 'Bateria: nível de carga'
+              step: '4'
+              filter:
+                evaltype: AND
+                conditions:
+                  - macro: '{#SENSOR_NAME}'
+                    value: '^Charge Level$'
+                    formulaid: A
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Level$
+                    formulaid: B
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Bateria com carga'
+                  discover: DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Bateria:'
+                  discover: DISCOVER
+            - name: 'Bateria: degradação'
+              step: '5'
+              filter:
+                evaltype: AND
+                conditions:
+                  - macro: '{#SENSOR_NAME}'
+                    value: '^Degradation Level$'
+                    formulaid: A
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Level$
+                    formulaid: B
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Bateria com degradação'
+                  discover: DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Bateria:'
+                  discover: DISCOVER
+            - name: 'Armazenamento: desgaste'
+              step: '6'
+              filter:
+                evaltype: AND
+                conditions:
+                  - macro: '{#SENSOR_NAME}'
+                    value: '^Percentage Used$'
+                    formulaid: A
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Level$
+                    formulaid: B
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Armazenamento com desgaste'
+                  discover: DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Armazenamento:'
+                  discover: DISCOVER
+            - name: 'Armazenamento: vida útil e área reserva'
+              step: '7'
+              filter:
+                evaltype: AND
+                conditions:
+                  - macro: '{#SENSOR_NAME}'
+                    value: '^(Remaining Life|Available Spare)$'
+                    formulaid: A
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^Level$
+                    formulaid: B
+              operations:
+                - operationobject: TRIGGER_PROTOTYPE
+                  operator: LIKE
+                  value: 'Armazenamento com vida útil'
+                  discover: DISCOVER
+                - operationobject: GRAPH_PROTOTYPE
+                  operator: LIKE
+                  value: 'Armazenamento:'
+                  discover: DISCOVER
+            - name: 'Histórico curto para sensores de alta variação'
+              step: '8'
+              filter:
+                conditions:
+                  - macro: '{#SENSOR_TYPE}'
+                    value: ^(Clock|Load|Control|Data|SmallData|Throughput)$
+                    formulaid: A
+              operations:
+                - operationobject: ITEM_PROTOTYPE
+                  operator: LIKE
+                  value: 'Hardware:'
+                  history: 7d
+                  trends: 180d
+      tags:
+        - tag: class
+          value: hardware
+        - tag: target
+          value: librehardwaremonitor
+      macros:
+        - macro: '{$LHM.BATTERY.CHARGE.CRIT}'
+          value: '10'
+          description: 'Carga da bateria (%) abaixo da qual gera alerta crítico.'
+        - macro: '{$LHM.BATTERY.CHARGE.WARN}'
+          value: '20'
+          description: 'Carga da bateria (%) abaixo da qual gera alerta de atenção.'
+        - macro: '{$LHM.BATTERY.DEGRADATION.WARN}'
+          value: '30'
+          description: 'Degradação da bateria (%) acima da qual gera alerta.'
+        - macro: '{$LHM.FAN.MIN}'
+          value: '0'
+          description: 'Rotação mínima (RPM). Valor 0 desativa a trigger. Use contexto por {#SENSOR_ID} para ativar em ventoinhas específicas.'
+        - macro: '{$LHM.FAN.PERIOD}'
+          value: 5m
+          description: 'Janela de avaliação das triggers de ventoinha.'
+        - macro: '{$LHM.INTERVAL}'
+          value: 1m
+          description: 'Intervalo de coleta do item mestre lhm.sensors.'
+        - macro: '{$LHM.NODATA.TIMEOUT}'
+          value: 10m
+          description: 'Tempo sem dados até gerar alerta de falha de coleta.'
+        - macro: '{$LHM.SENSOR.HW.MATCHES}'
+          value: '.*'
+          description: 'Regex de hardware ({#SENSOR_HW}) a descobrir.'
+        - macro: '{$LHM.SENSOR.HW.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex de hardware ({#SENSOR_HW}) a ignorar.'
+        - macro: '{$LHM.SENSOR.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex de nome de sensor ({#SENSOR_NAME}) a descobrir.'
+        - macro: '{$LHM.SENSOR.NAME.NOT_MATCHES}'
+          value: 'Distance to TjMax'
+          description: 'Regex de nome de sensor ({#SENSOR_NAME}) a ignorar. Por padrão descarta os sensores Distance to TjMax.'
+        - macro: '{$LHM.SENSOR.TYPE.MATCHES}'
+          value: ^(Temperature|Fan|Control|Load|Clock|Voltage|Current|Power|Energy|Level|Data|SmallData|Throughput)$
+          description: 'Regex de tipos de sensor ({#SENSOR_TYPE}) a descobrir. Level, Current e Energy cobrem bateria e vida útil de SSD.'
+        - macro: '{$LHM.SENSOR.TYPE.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex de tipos de sensor ({#SENSOR_TYPE}) a ignorar.'
+        - macro: '{$LHM.SENSORS.DROP.RATIO}'
+          value: '0.8'
+          description: 'Fração do máximo da última hora abaixo da qual a queda na quantidade de sensores gera alerta.'
+        - macro: '{$LHM.STORAGE.LIFE.MIN}'
+          value: '20'
+          description: 'Vida útil restante ou área reserva (%) mínima do SSD.'
+        - macro: '{$LHM.STORAGE.WEAR.WARN}'
+          value: '80'
+          description: 'Desgaste (%) do SSD NVMe acima do qual gera alerta.'
+        - macro: '{$LHM.TEMP.CRIT}'
+          value: '90'
+          description: 'Limite crítico padrão de temperatura (°C).'
+        - macro: '{$LHM.TEMP.CRIT:regex:"^/(amdcpu|intelcpu)/"}'
+          value: '95'
+          description: 'Limite crítico de temperatura da CPU (°C).'
+        - macro: '{$LHM.TEMP.CRIT:regex:"^/(gpu-amd|gpu-intel|gpu-nvidia)/"}'
+          value: '90'
+          description: 'Limite crítico de temperatura da GPU (°C).'
+        - macro: '{$LHM.TEMP.CRIT:regex:"^/(hdd|nvme|ssd)/"}'
+          value: '70'
+          description: 'Limite crítico de temperatura de discos e SSDs (°C).'
+        - macro: '{$LHM.TEMP.CRIT:regex:"^/lpc/"}'
+          value: '80'
+          description: 'Limite crítico de temperatura dos sensores da placa-mãe (°C).'
+        - macro: '{$LHM.TEMP.HYST}'
+          value: '5'
+          description: 'Histerese (°C) para recuperação das triggers de temperatura.'
+        - macro: '{$LHM.TEMP.PERIOD}'
+          value: 5m
+          description: 'Janela de avaliação das triggers de temperatura.'
+        - macro: '{$LHM.TEMP.WARN}'
+          value: '80'
+          description: 'Limite de atenção padrão de temperatura (°C).'
+        - macro: '{$LHM.TEMP.WARN:regex:"^/(amdcpu|intelcpu)/"}'
+          value: '85'
+          description: 'Limite de atenção de temperatura da CPU (°C).'
+        - macro: '{$LHM.TEMP.WARN:regex:"^/(gpu-amd|gpu-intel|gpu-nvidia)/"}'
+          value: '83'
+          description: 'Limite de atenção de temperatura da GPU (°C).'
+        - macro: '{$LHM.TEMP.WARN:regex:"^/(hdd|nvme|ssd)/"}'
+          value: '60'
+          description: 'Limite de atenção de temperatura de discos e SSDs (°C).'
+        - macro: '{$LHM.TEMP.WARN:regex:"^/lpc/"}'
+          value: '70'
+          description: 'Limite de atenção de temperatura dos sensores da placa-mãe (°C).'
       dashboards:
         - uuid: 12a86b056ca947d7aa98ca61803f1b0a
-          name: 'Temperaturas Críticas (CPU, GPU e Armazenamento)'
+          name: 'Sensores de hardware (LHM)'
           pages:
-            - widgets:
+            - name: CPU
+              widgets:
                 - type: svggraph
-                  name: 'CPU - Temperaturas (°C)'
+                  name: 'CPU - Temperatura (°C)'
                   width: '36'
                   height: '5'
                   fields:
                     - type: STRING
                       name: ds.0.color
-                      value: 0040FF
+                      value: FF3D00
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
                     - type: STRING
                       name: ds.0.items.0
                       value: 'Hardware: * - CPU Package (Temperature)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
                     - type: STRING
-                      name: ds.0.items.1
-                      value: 'Hardware: * - Core Average (Temperature)'
+                      name: ds.1.color
+                      value: FF9100
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
                     - type: STRING
-                      name: ds.0.items.2
+                      name: ds.1.items.0
                       value: 'Hardware: * - Core Max (Temperature)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: FFD600
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - Core Average (Temperature)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
                     - type: INTEGER
                       name: legend_statistic
                       value: '1'
@@ -103,20 +639,41 @@ zabbix_export:
                       name: righty
                       value: '0'
                 - type: svggraph
-                  name: 'CPU - Uso e Desempenho (%)'
+                  name: 'CPU - Uso (%)'
                   'y': '5'
                   width: '36'
                   height: '5'
                   fields:
                     - type: STRING
                       name: ds.0.color
-                      value: 00BFFF
+                      value: 2979FF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
                     - type: STRING
                       name: ds.0.items.0
                       value: 'Hardware: * - CPU Total (Load)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
                     - type: STRING
-                      name: ds.0.items.1
+                      name: ds.1.color
+                      value: 00E5FF
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
                       value: 'Hardware: * - CPU Core Max (Load)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
                     - type: INTEGER
                       name: legend_statistic
                       value: '1'
@@ -127,20 +684,50 @@ zabbix_export:
                       name: righty
                       value: '0'
                 - type: svggraph
-                  name: 'CPU - Consumo de Energia (Watts)'
+                  name: 'CPU - Potência (W)'
                   'y': '10'
                   width: '36'
                   height: '5'
                   fields:
                     - type: STRING
                       name: ds.0.color
-                      value: FDD835
+                      value: FFC400
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
                     - type: STRING
                       name: ds.0.items.0
                       value: 'Hardware: * - CPU Package (Power)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
                     - type: STRING
-                      name: ds.0.items.1
+                      name: ds.1.color
+                      value: FF6D00
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
                       value: 'Hardware: * - CPU Cores (Power)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: 00C853
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - CPU Graphics (Power)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
                     - type: INTEGER
                       name: legend_statistic
                       value: '1'
@@ -151,20 +738,146 @@ zabbix_export:
                       name: righty
                       value: '0'
                 - type: svggraph
-                  name: 'GPU - Temperaturas (°C)'
+                  name: 'CPU - Temperatura por núcleo (°C)'
                   x: '36'
                   width: '36'
                   height: '5'
                   fields:
                     - type: STRING
                       name: ds.0.color
-                      value: FF4000
+                      value: F4511E
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - *Core #* (Temperature)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: USCZZ
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'CPU - Uso por núcleo (%)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 448AFF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - CPU Core #* (Load)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: KPJZT
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'CPU - Frequência por núcleo (MHz)'
+                  x: '36'
+                  'y': '10'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 7C4DFF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - *Core #* (Clock)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: APBQC
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+            - name: GPU
+              widgets:
+                - type: svggraph
+                  name: 'GPU - Temperatura (°C)'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF3D00
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
                     - type: STRING
                       name: ds.0.items.0
                       value: 'Hardware: * - GPU Core (Temperature)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
                     - type: STRING
-                      name: ds.0.items.1
+                      name: ds.1.color
+                      value: FF9100
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
                       value: 'Hardware: * - GPU Hot Spot (Temperature)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: D500F9
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - GPU Memory Junction (Temperature)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
                     - type: INTEGER
                       name: legend_statistic
                       value: '1'
@@ -175,24 +888,65 @@ zabbix_export:
                       name: righty
                       value: '0'
                 - type: svggraph
-                  name: 'GPU - Uso e VRAM (%)'
-                  x: '36'
+                  name: 'GPU - Uso (%)'
                   'y': '5'
                   width: '36'
                   height: '5'
                   fields:
                     - type: STRING
                       name: ds.0.color
-                      value: 66BB6A
+                      value: '00E676'
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
                     - type: STRING
                       name: ds.0.items.0
                       value: 'Hardware: * - GPU Core (Load)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
                     - type: STRING
-                      name: ds.0.items.1
-                      value: 'Hardware: * - GPU Memory (Load)'
+                      name: ds.1.color
+                      value: 2979FF
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
                     - type: STRING
-                      name: ds.0.items.2
+                      name: ds.1.items.0
                       value: 'Hardware: * - GPU Memory Controller (Load)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: FFD600
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - GPU Video Engine (Load)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.3.color
+                      value: D500F9
+                    - type: INTEGER
+                      name: ds.3.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.3.items.0
+                      value: 'Hardware: * - GPU Memory (Load)'
+                    - type: INTEGER
+                      name: ds.3.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
                     - type: INTEGER
                       name: legend_statistic
                       value: '1'
@@ -203,7 +957,149 @@ zabbix_export:
                       name: righty
                       value: '0'
                 - type: svggraph
-                  name: 'GPU - Consumo e Fans'
+                  name: 'GPU - Potência (W) e ventoinhas (RPM)'
+                  'y': '10'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FFC400
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Package (Power)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: INTEGER
+                      name: ds.1.axisy
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 26C6DA
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - GPU Fan* (Fan)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: JCJLA
+                    - type: STRING
+                      name: righty_min
+                      value: '0'
+                - type: svggraph
+                  name: 'GPU - Memória dedicada (MB)'
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: D500F9
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Memory Used (SmallData)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: '00E676'
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - GPU Memory Free (SmallData)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: 9E9E9E
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - GPU Memory Total (SmallData)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: HINDF
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'GPU - Clock (MHz)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 00B0FF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Core (Clock)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FF4081
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - GPU Memory (Clock)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: TLSNU
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'GPU - Controle das ventoinhas (%)'
                   x: '36'
                   'y': '10'
                   width: '36'
@@ -211,22 +1107,821 @@ zabbix_export:
                   fields:
                     - type: STRING
                       name: ds.0.color
-                      value: FF8F00
-                    - type: STRING
-                      name: ds.0.items.0
-                      value: 'Hardware: * - GPU Package (Power)'
+                      value: 26C6DA
                     - type: INTEGER
-                      name: ds.1.axisy
+                      name: ds.0.fill
                       value: '1'
                     - type: STRING
-                      name: ds.1.color
-                      value: FF6F00
+                      name: ds.0.items.0
+                      value: 'Hardware: * - GPU Fan* (Control)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
                     - type: STRING
-                      name: ds.1.items.0
-                      value: 'Hardware: * - GPU Fan * (Fan)'
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
                     - type: INTEGER
                       name: legend_statistic
                       value: '1'
                     - type: STRING
                       name: reference
-                      value: JCJLA
+                      value: CPPJL
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+            - name: 'Placa-mãe e ventoinhas'
+              widgets:
+                - type: svggraph
+                  name: 'Ventoinhas (RPM)'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 26A69A
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - * (Fan)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: HFMNA
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Placa-mãe - Temperaturas (°C)'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF7043
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: Nuvoton* - * (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: ITE* - * (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.2
+                      value: 'Hardware: Fintek* - * (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.3
+                      value: 'Hardware: Winbond* - * (Temperature)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: EIKBV
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Controle das ventoinhas (%)'
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 8D6E63
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - * (Control)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: VQJUR
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Placa-mãe - Tensões (V)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 5C6BC0
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: Nuvoton* - * (Voltage)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: ITE* - * (Voltage)'
+                    - type: STRING
+                      name: ds.0.items.2
+                      value: 'Hardware: Fintek* - * (Voltage)'
+                    - type: STRING
+                      name: ds.0.items.3
+                      value: 'Hardware: Winbond* - * (Voltage)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: UOKTY
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+            - name: 'Bateria (notebook)'
+              widgets:
+                - type: svggraph
+                  name: 'Bateria - Carga (%)'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: '00E676'
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '3'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Charge Level (Level)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: IHULR
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Bateria - Taxa de carga e descarga (W)'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FFC400
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - *Rate (Power)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: FDKCJ
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Bateria - Capacidade (mWh)'
+                  'y': '10'
+                  width: '72'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 9E9E9E
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Designed Capacity (Energy)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 2979FF
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Full* Capacity (Energy)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: '00E676'
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - Remaining Capacity (Energy)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: HAMLB
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Bateria - Degradação (%)'
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF5252
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '3'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Degradation Level (Level)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: YQGYB
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Bateria - Corrente (A) e tensão (V)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 2979FF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - *Current (Current)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: INTEGER
+                      name: ds.1.axisy
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.color
+                      value: D500F9
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Voltage (Voltage)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: DEBUS
+            - name: 'Memória e armazenamento'
+              widgets:
+                - type: svggraph
+                  name: 'Memória - Uso (%)'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: AB47BC
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Memory (Load)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 7E57C2
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Virtual Memory (Load)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: UDKJS
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Armazenamento - Temperatura (°C)'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: F4511E
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Temperature (Temperature)'
+                    - type: STRING
+                      name: ds.0.items.1
+                      value: 'Hardware: * - Composite Temperature (Temperature)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: VOBES
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Armazenamento - Leitura e escrita'
+                  'y': '10'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 00B0FF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Read Rate (Throughput)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FF9100
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Write Rate (Throughput)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: NDEHW
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Memória - Usada e disponível (GB)'
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: D81B60
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Memory Used (Data)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 7CB342
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Memory Available (Data)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: BIPOM
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Armazenamento - Vida útil e desgaste (%)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FF5252
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Percentage Used (Level)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: '00E676'
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Available Spare (Level)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.2.color
+                      value: 2979FF
+                    - type: INTEGER
+                      name: ds.2.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.2.items.0
+                      value: 'Hardware: * - Remaining Life (Level)'
+                    - type: INTEGER
+                      name: ds.2.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: OLLRW
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Armazenamento - Atividade e espaço usado (%)'
+                  x: '36'
+                  'y': '10'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: FFD600
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Total Activity (Load)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: 8D6E63
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '0'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Used Space (Load)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: OUZKK
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+            - name: Rede
+              widgets:
+                - type: svggraph
+                  name: 'Rede - Download e upload'
+                  width: '72'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 22D3A6
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Download Speed (Throughput)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FFC542
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Upload Speed (Throughput)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: NPNNU
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Rede - Utilização (%)'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 2979FF
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Network Utilization (Load)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_max
+                      value: '100'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: CVTWE
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+                - type: svggraph
+                  name: 'Rede - Volume transferido (GB)'
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: STRING
+                      name: ds.0.color
+                      value: 22D3A6
+                    - type: INTEGER
+                      name: ds.0.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.0.items.0
+                      value: 'Hardware: * - Data Downloaded (Data)'
+                    - type: INTEGER
+                      name: ds.0.width
+                      value: '2'
+                    - type: STRING
+                      name: ds.1.color
+                      value: FFC542
+                    - type: INTEGER
+                      name: ds.1.fill
+                      value: '1'
+                    - type: STRING
+                      name: ds.1.items.0
+                      value: 'Hardware: * - Data Uploaded (Data)'
+                    - type: INTEGER
+                      name: ds.1.width
+                      value: '2'
+                    - type: STRING
+                      name: lefty_min
+                      value: '0'
+                    - type: INTEGER
+                      name: legend_statistic
+                      value: '1'
+                    - type: STRING
+                      name: reference
+                      value: JGEQM
+                    - type: INTEGER
+                      name: righty
+                      value: '0'
+            - name: 'Gráficos por sensor'
+              widgets:
+                - type: graphprototype
+                  name: 'Temperaturas por sensor'
+                  width: '72'
+                  height: '10'
+                  fields:
+                    - type: INTEGER
+                      name: columns
+                      value: '3'
+                    - type: GRAPH_PROTOTYPE
+                      name: graphid.0
+                      value:
+                        host: 'Template Sensores Windows'
+                        name: 'Temperatura: {#SENSOR_HW} - {#SENSOR_NAME}'
+                    - type: STRING
+                      name: reference
+                      value: FYULL
+                    - type: INTEGER
+                      name: rows
+                      value: '2'
+                - type: graphprototype
+                  name: 'Ventoinhas por sensor'
+                  'y': '10'
+                  width: '72'
+                  height: '5'
+                  fields:
+                    - type: INTEGER
+                      name: columns
+                      value: '4'
+                    - type: GRAPH_PROTOTYPE
+                      name: graphid.0
+                      value:
+                        host: 'Template Sensores Windows'
+                        name: 'Ventoinha: {#SENSOR_HW} - {#SENSOR_NAME}'
+                    - type: STRING
+                      name: reference
+                      value: BFQET
+                    - type: INTEGER
+                      name: rows
+                      value: '1'
+                - type: graphprototype
+                  name: 'Bateria por sensor'
+                  'y': '15'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: INTEGER
+                      name: columns
+                      value: '2'
+                    - type: GRAPH_PROTOTYPE
+                      name: graphid.0
+                      value:
+                        host: 'Template Sensores Windows'
+                        name: 'Bateria: {#SENSOR_HW} - {#SENSOR_NAME}'
+                    - type: STRING
+                      name: reference
+                      value: SLOLS
+                    - type: INTEGER
+                      name: rows
+                      value: '1'
+                - type: graphprototype
+                  name: 'Armazenamento por sensor'
+                  x: '36'
+                  'y': '15'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: INTEGER
+                      name: columns
+                      value: '2'
+                    - type: GRAPH_PROTOTYPE
+                      name: graphid.0
+                      value:
+                        host: 'Template Sensores Windows'
+                        name: 'Armazenamento: {#SENSOR_HW} - {#SENSOR_NAME}'
+                    - type: STRING
+                      name: reference
+                      value: CNVQS
+                    - type: INTEGER
+                      name: rows
+                      value: '1'
