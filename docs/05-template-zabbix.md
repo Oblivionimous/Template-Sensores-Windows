@@ -9,9 +9,12 @@ Estes passos rodam no frontend web do Zabbix Server. O arquivo do template está
 
 O template se chama `Template Sensores Windows` e fica no grupo `Personalizados`.
 
+<img width="1675" height="444" alt="image" src="https://github.com/user-attachments/assets/4e996b4b-1ed5-429c-87b8-96c30cc8b634" />
+
+
 ## 5.2 Vincular ao host
 
-1. Vá em Data collection > Hosts > DESKTOP-MAURO.
+1. Vá em Data collection > Hosts > Seu Host.
 2. Na aba Templates, adicione `Template Sensores Windows`.
 3. Salve.
 
