@@ -58,6 +58,8 @@ Esta etapa tem duas partes. A primeira publica o JSON que o script lê. A segund
 
 ### Início automático
 
+<img width="457" height="632" alt="image" src="https://github.com/user-attachments/assets/5bbf90e1-6fc6-4b44-93ba-5d493223d591" />
+
 1. Em Options, marque Run On Windows Startup.
 2. Em Options, marque Start Minimized, para o programa subir sem abrir a janela.
 3. Em Options, marque Minimize To Tray, para ficar apenas na bandeja do sistema.
